@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+
+import sys
+import json
+import pickle
+import re
+import itertools
+import heapq
+import time
+import random
+import string
+import collections
+import nacl.encoding
+import nacl.signing
+from nacl.hash import blake2b
+from nacl.bindings.utils import sodium_memcmp
+import nacl.hash
+import json
+import logging
+import os.path
+import itertools
+CLIENT = import_da('client')
+SERVER = import_da('replica')
+
+HASHER = nacl.hash.sha256
+
+class Olympus(process):
+    def setup(clients,olympus,numReplicas,head_timeout,nonhead_timeout,client_public_keys,reT,failures,checkpt_interval):
+        self.clientList = list(clients)
+        self.olympus = olympus
+        self.serverList = []
+        self.numReplicas = numReplicas			# Number of Replicas 
+        self.replica_signing_keys = []          # Replica Public-Private Key Pairs
+        self.public_keys = dict()               # Replica Public Key Pairs
+        self.client_public_keys = client_public_keys               # Client Public Key Pairs
+        self.logger = logging.getLogger()
+        self.replica_failures_dict = failures
+        self.configurationID = 0
+        self.isConfiguring = False
+        self.privateKey = None
+        self.publicKey = None
+        self.replicaHistory = []
+        self.replicaCheckPointProof = []
+        self.replicaResultStatementCache = []
+        self.reverseServerDict = {}
+        self.wedgeResponseCount = 0
+        self.quorumCount = 0
+        self.quorumTried = set()
+        self.replicasInQuorum = []
+        self.checkQuorumLock = 0
+        self.selectedQuorum = []
+        self.olympusTimeout = 20
+        self.runningStateHashes = set()
+        self.caughtUpCount = 0
+        self.isReconfiguring = False
+        self.clientDicts = dict()
+        self.replicaRunningState = None
+        self.oldServerList = []
+    def run():
+        config(channel="fifo")
+        logpath = './logs'
+        logfile = 'Olympus_'+str(self)+'.log'
+        fh = logging.FileHandler(os.path.join(logpath,logfile))
+        formatter = logging.Formatter('%(asctime)s - %(processName)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        logger.setLevel(logging.DEBUG)
+        self.privateKey = nacl.signing.SigningKey.generate()
+        self.publicKey = self.privateKey.verify_key.encode(encoder=nacl.encoding.HexEncoder)
+        logger.info('Olympus: '+str(olympus)+' started running. Client List: '+str(clientList))
+        servers = new(SERVER.Server, num=numReplicas)
+        serverList = list(servers)
+        # Create Private-Public Key Pairs for each replica and store them.
+        for process in serverList:
+            signing_key = nacl.signing.SigningKey.generate()
+            replica_signing_keys.append(signing_key)
+            verify_key = signing_key.verify_key
+	    # Serialize the verify key to send it to a third party
+            verify_key_hex = verify_key.encode(encoder=nacl.encoding.HexEncoder)
+            public_keys[process] = verify_key_hex
+
+        logger.info('Olympus: '+str(olympus)+' Server List: '+str(serverList)+' Server Public Keys: '+str(public_keys) + ' Head Timeout: '+str(head_timeout)+ ' NonHead Timeout: '+str(nonhead_timeout))
+        # Setup Replicas
+        id=0
+        rDict = {}
+        for process in serverList:
+            self.replicaHistory.append(None)
+            self.replicaCheckPointProof.append(None)
+            self.replicaResultStatementCache.append(None)
+
+            fdKey = str(configurationID)+','+str(id)
+            failures_dict = self.replica_failures_dict[fdKey] if fdKey in self.replica_failures_dict else {}
+            reverseServerDict[process] = id;
+            if(id==0):
+                setup({process}, (clientList, serverList, olympus, id, replica_signing_keys[id], public_keys, None , id+1, client_public_keys, head_timeout, self.publicKey, reT,failures_dict,rDict,None,self.configurationID,checkpt_interval))
+            elif(id==numReplicas-1):
+                setup({process}, (clientList, serverList, olympus, id, replica_signing_keys[id], public_keys, id-1 , None, client_public_keys, nonhead_timeout, self.publicKey, reT,failures_dict,rDict,None,self.configurationID,checkpt_interval))
+            else:
+                setup({process}, (clientList, serverList, olympus, id, replica_signing_keys[id], public_keys, id-1 , id+1, client_public_keys, nonhead_timeout, self.publicKey, reT,failures_dict,rDict,None,self.configurationID,checkpt_interval))
+            id+=1
+        quorumCount = int((numReplicas+1)/2)
+        start(servers)
+        if(await(False)): pass
+        else: pass
+        logger.info('Olympus: '+str(olympus)+' is Exiting')
+        output("Olympus: Exiting")
+
+    def setupNewProcesses(runningState,rsHash):
+        self.oldServerList = self.serverList
+        self.configurationID +=1
+        servers = new(SERVER.Server, num=numReplicas)
+        self.serverList = list(servers)
+        self.replica_signing_keys = [] 
+        self.public_keys = dict()
+        # Create Private-Public Key Pairs for each replica and store them.
+        for process in serverList:
+            signing_key = nacl.signing.SigningKey.generate()
+            replica_signing_keys.append(signing_key)
+            verify_key = signing_key.verify_key
+            # Serialize the verify key to send it to a third party
+            verify_key_hex = verify_key.encode(encoder=nacl.encoding.HexEncoder)
+            public_keys[process] = verify_key_hex
+
+        logger.info('Olympus: '+str(olympus)+' Server List: '+str(serverList)+' Server Public Keys: '+str(public_keys) + ' Head Timeout: '+str(head_timeout)+ ' NonHead Timeout: '+str(nonhead_timeout))
+        # Setup Replicas
+        id=0
+        self.replicaHistory = []
+        self.replicaCheckPointProof = []
+        self.replicaResultStatementCache = []
+        self.reverseServerDict = {}
+        for process in serverList:
+            self.replicaHistory.append(None)
+            self.replicaCheckPointProof.append(None)
+            self.replicaResultStatementCache.append(None)
+            fdKey = str(configurationID)+','+str(id)
+
+            failures_dict = self.replica_failures_dict[fdKey] if fdKey in self.replica_failures_dict else {}
+            reverseServerDict[process] = id;
+            if(id==0):
+                setup({process}, (clientList, serverList, olympus, id, replica_signing_keys[id], public_keys, None , id+1, client_public_keys, head_timeout, self.publicKey, reT,failures_dict, runningState, rsHash,self.configurationID,checkpt_interval))
+            elif(id==numReplicas-1):
+                setup({process}, (clientList, serverList, olympus, id, replica_signing_keys[id], public_keys, id-1 , None, client_public_keys, nonhead_timeout, self.publicKey, reT,failures_dict, runningState, rsHash,self.configurationID,checkpt_interval))
+            else:
+                setup({process}, (clientList, serverList, olympus, id, replica_signing_keys[id], public_keys, id-1 , id+1, client_public_keys, nonhead_timeout, self.publicKey, reT,failures_dict, runningState, rsHash,self.configurationID,checkpt_interval))
+            id+=1
+
+        start(servers)
+        self.isReconfiguring = False
+        for i in self.oldServerList:
+            send(('KillURS',), to=i)		# Send replica list	
+
+    def receive(msg=('SendConfiguration',), from_=p):		# Configuration Request from client/replicas
+        if self.isReconfiguring == True:
+            return
+     
+        output("Olympus has the configuration and sending it to processs",str(p))
+        logger.info('Olympus: '+str(olympus)+' Received a configuration request from Process: '+str(p))
+        if self.isReconfiguring == True:
+            send(('ReceiveConfiguration',None,None), to=p)		# Send replica list	
+        else:
+            send(('ReceiveConfiguration',serverList,self.public_keys), to=p)		# Send replica list	
+        logger.info('Olympus: '+str(olympus)+' Sent configuration to Process: '+str(p))
+
+    def receive(msg=('Reconfiguration From Client',result,resultShuttle), from_=p):		# Configuration Request from client
+        if self.isReconfiguring == True:
+            return
+        output("Received Reconfiguration Request from Client",str(p),"and Proof is provided!")
+        trustClient = False
+        i = 0
+        orig_dgs = HASHER(result.encode(),encoder=nacl.encoding.HexEncoder)
+        rsSet = set()
+        for sRs in resultShuttle[2]:
+            verify_key = nacl.signing.VerifyKey(public_keys[serverList[i]], encoder=nacl.encoding.HexEncoder)
+            try:
+                re_ = verify_key.verify(resultShuttle[2][i])
+            except:
+                logger.error('Client: '+str(self)+' Signature verification failed for Response: '+str(result)+' Request: '+str(resultShuttle[1]))
+                logger.warning('Client: '+str(self)+' Raising Reconfiguration Request')
+                output("Signature verification failed for request:",resultShuttle[1],"Raising Reconfiguration Request")
+                i+=1
+                trustClient = True
+                break
+            rsSet.add(re_)
+            re_ = json.loads(re_)
+            if str(re_[1])!=str(orig_dgs):
+                logger.error('Client: '+str(self)+' Cryptographic hash mismatch error. Integrity of Response has been compromised for: ' +str(result)+' Request: '+str(resultShuttle[1]))
+                logger.warning('Client: '+str(self)+' Raising Reconfiguration Request')
+                output("Cryptographic hash mismatch error. Result's integrity has been compromised. Message Digest check fails")
+                trustClient = True
+                break
+        if len(rsSet)!=1:
+            trustClient = True
+
+        if trustClient == True:
+            output("Received a Reconfiguration request from Client and Proof is validated. Client:",str(p))
+            self.isReconfiguring = True
+            self.wedgeResponseCount = 0 
+            self.selectedQuorum = []
+            self.runningStateHashes = set()
+            for server in serverList:
+                signedWedgeRequest = privateKey.sign("Wedge".encode())
+                logger.info('Olympus: '+str(olympus)+' Sending Wedge Request to Server: '+str(p))
+                send(('Wedge Request',signedWedgeRequest), to=server)          # Send Wedge Request to all the replicas
+
+ 
+
+
+
+    def receive(msg=('Reconfiguration',), from_=p):		# Reconfiguration Request from replicas
+        if self.isReconfiguring == True:
+            return 
+        logger.info('Olympus: '+str(olympus)+' Received a re-configuration request from Process(Server): '+str(p))
+        output("Olympus",str(self),"Received a Reconfiguration request from Process: ",str(p))
+        sendWedgeRequests()
+
+    def sendWedgeRequests():
+        self.checkQuorumLock = 0
+        self.runningStateHashes = set()
+        self.caughtUpCount = 0
+        self.isReconfiguring = True
+        self.wedgeResponseCount = 0
+        self.selectedQuorum = []
+        self.quorumTried = set()
+        self.runningStateHashes = set()
+        self.replicasInQuorum = []
+        for server in serverList:
+            signedWedgeRequest = privateKey.sign("Wedge".encode())
+            logger.info('Olympus: '+str(olympus)+' sending wedge request to server '+str(server))
+            send(('Wedge Request',signedWedgeRequest), to=server)          # Send Wedge Request to all the replicas
+
+    def returnOrderStatementsList(signedOrderStatements):
+        osList = []
+        logger.info('Olympus: '+str(olympus)+' Quorum is selecting a quorum ! ')
+        i  = 0 
+        osSet = set()
+        for sOs in signedOrderStatements:    # signed order statements
+            verify_key = nacl.signing.VerifyKey(public_keys[serverList[i]], encoder=nacl.encoding.HexEncoder)
+            try:
+                os = verify_key.verify(sOs)
+            except:
+                output("Signature verification of Order Proof failed while checking Quorum. Try with another Quorum")
+                return None
+            os = json.loads(os)
+            osList.append(os)
+            osSet.add((os[0],)+tuple(os[1]))
+            i+=1
+        return osList
+
+    def checkPrefix(list1,list2):
+        j = 0
+        if len(list1) > len(list2):
+            return False
+        for i in list1:
+            if i!=list2[j]:
+                return False
+            j+=1
+        return True
+
+    def isValidCheckPointProof(quo):
+        slot = replicaHistory[quo[0]][0][0]
+        for rep in quo:
+            if replicaHistory[rep][0][0] == slot:
+                try:
+                    cpp = self.replicaCheckPointProof[rep][-1]
+                except:
+                    continue
+            else:
+                try:
+                    cpp = self.replicaCheckPointProof[rep][-2]
+                except:
+                    continue
+            k = 0
+            cpStatements = set()
+            for i in cpp[1]:
+                verify_key = nacl.signing.VerifyKey(public_keys[serverList[k]], encoder=nacl.encoding.HexEncoder)
+                try:
+                    re_ = verify_key.verify(i)
+                except:
+                    return False
+                cpStatements.add(re_)
+                k += 1
+            if len(cpStatements) > (self.numReplicas/2)+1:
+                return False
+        return True
+    def isCheckPointsBaseDiffAndValid(quo):
+        baseDiff = set()
+        for i in quo:
+            baseDiff.add(replicaHistory[i][0][0])
+        return len(baseDiff)!=1
+
+        
+    def validHistoryinQuo(quo):
+        lenHL = []
+        for q in quo:
+             lenHL.append(len(replicaHistory[q]))
+             for i in replicaHistory[q]:
+                 osList = returnOrderStatementsList(i[2])
+                 mySet = set()
+                 for k in osList:
+                     mySet.add(tuple(k[1]))
+                 if len(mySet)!=1:
+                     return False
+        if lenHL != sorted(lenHL, reverse=True):
+            return False
+        return True
+    def checkQuorum():
+        replicasInQuorum.sort()
+        size = len(replicasInQuorum)
+        if checkQuorumLock == 0 and len(self.selectedQuorum) == 0:
+            checkQuorumLock = 1
+            f = 0
+            allQuorums = list(itertools.combinations(replicasInQuorum,quorumCount))
+            for quo in allQuorums:
+                if quo in quorumTried:
+                   continue
+                output("WHY THIS ISSUE QUoRUM is selected. Fun FUN FUN !!!",allQuorums) 
+                self.quorumTried.add(quo)
+                if not validHistoryinQuo(quo):
+                    continue
+                if not isValidCheckPointProof(quo):
+                    output("Quorum check point proof validity failed! Trying with another one")
+                    continue
+                if isCheckPointsBaseDiffAndValid(quo):
+                    self.selectedQuorum = list(quo)
+                    output("QUoRUM is selected but checkpoint base is different and balid !!!",quo) 
+                    checkQuorumLock = 0 # release lock
+                    catchUpReplicas()
+                    return True
+                # Got a quorum sequence. Let's check if its a Valid Quorum
+                lenHist = len(replicaHistory[quo[quorumCount-1]]) # replica with highest id will always have shortest history and longest orderProofs
+                i = 0
+                j = quorumCount-1
+                slot = replicaHistory[quo[j]][i][0]
+                operation = replicaHistory[quo[j]][i][1]
+                osList = returnOrderStatementsList(replicaHistory[quo[j]][i][2])
+                if osList == None:
+                    continue
+                j -= 1
+                while i<lenHist:
+                    flag = 0
+                    while j >=0:
+                        slot_ = replicaHistory[quo[j]][i][0]
+                        operation_ = replicaHistory[quo[j]][i][1]
+                        osList_ = returnOrderStatementsList(replicaHistory[quo[j]][i][2])
+                        if osList_ == None:
+                            flag = 1
+                            break
+                        if slot_!=slot or operation_!=operation or checkPrefix(osList_,osList)==False:
+                            flag = 1
+                            break
+                        j-=1
+                    if flag ==1: break
+                    i+=1
+                if i!=lenHist:
+                    continue
+                self.selectedQuorum = list(quo)
+                output("QUoRUM is selected. !!!",quo) 
+                logger.info('Olympus: '+str(olympus)+'Quorum of replicas is selected. Quorum Here:' + str(quo))
+                checkQuorumLock = 0 # release lock
+                catchUpReplicas()
+                return True
+            if len(replicasInQuorum)!=size and len(self.selectedQuorum) == 0:
+                checkQuorum()
+            checkQuorumLock = 0
+            return False
+        return False
+    def findOperationSequence(p):
+        LH = replicaHistory[selectedQuorum[0]]
+        opSeq = []
+        lenLH = len(LH)
+        i = lenLH - 1
+        while i>=0:
+            output("Finding operation sequence %%%%%%%%%%",replicaHistory[p][-1][0])
+            if LH[i][0] <= replicaHistory[p][-1][0]:
+                break
+            opSeq.append((LH[i][0],LH[i][1]))
+            i -= 1
+        return opSeq
+           
+    def catchUpReplicas():
+        self.caughtUpCount = 0
+        self.runningStateHashes = set()
+        for p in self.selectedQuorum:
+            diffHistory = findOperationSequence(p)
+            output("VERY VERY VERY IMPORTANT Sending Diff History",diffHistory)
+            logger.info('Olympus: '+str(olympus)+' Making replicas in quorum catch up sending them their diff history  '+str(diffHistory)+'to replica'+str(p))
+            
+            send(('Catch Up',diffHistory), to=serverList[p])          # Send Wedge Request to all the replicas
+        if(await(self.caughtUpCount == len(selectedQuorum))):
+            processCaughtUp()
+
+
+
+    def processWedgeResponse(checkPointProof,history,p):
+        pid = reverseServerDict[p]
+        replicaHistory[pid] = history
+        replicaCheckPointProof[pid] = checkPointProof
+        self.wedgeResponseCount += 1
+        if pid not in self.replicasInQuorum:
+            self.replicasInQuorum.append(pid)
+        if(self.wedgeResponseCount >= quorumCount):
+            logger.info('Olympus: '+str(olympus)+' Got wedge response including  '+str(checkPointProof)+str(history))
+            output("GOT WEDGE RESPONSE",self.wedgeResponseCount)
+            stat = checkQuorum()
+            if stat == False:
+                output("!!!! NO QUORUM FOUND !!! TRY AGAIN",stat)
+                if(await(len(self.selectedQuorum)!=0)): pass
+                elif timeout(5):
+                    sendWedgeRequests()
+
+    
+    def receive(msg=('Wedge Response',checkPointProof,history), from_=p):		# Configuration Request from client/replicas
+        if self.isReconfiguring == False:
+            return   
+        output("Received Wedge Response message from Replica: ",str(p),str(history))
+        logger.info('Olympus: '+str(olympus)+' Olympus received Wedge Response including  '+str(checkPointProof)+str(history))
+        processWedgeResponse(checkPointProof,history,p)
+    
+    def processCaughtUp():
+        if len(runningStateHashes) > 1:
+            output("Quorum failed need to take another quorum")
+            self.selectedQuorum = []
+            checkQuorumLock = 0
+            checkQuorum()
+            return
+        while True:
+            proc = random.choice(selectedQuorum)
+            self.replicaRunningState = None
+            send(('get_running_state',), to=serverList[proc])          # Send Wedge Request to all the replicas
+            output("Getting running state from process ",str(proc))
+            if(await(self.replicaRunningState!=None)):
+                runningStateHash_ = HASHER(json.dumps(self.replicaRunningState).encode(), encoder=nacl.encoding.HexEncoder)
+                output("::::::::::::::::::::::::::::::::::::: self.replicaRunningState",self.replicaRunningState,runningStateHash_ != list(runningStateHashes)[0])
+                if runningStateHash_ != list(runningStateHashes)[0]:
+                    continue
+                else:
+                    break
+        sendClientResult()
+        output("Creating New processes NOW!!!")
+        logger.info('Olympus: '+str(olympus)+' Olympus is starting new processes now as part of the new configuration ')
+        self.isReconfiguring = True
+        setupNewProcesses(self.replicaRunningState,list(runningStateHashes)[0])
+    
+    def receive(msg=('Caught Up',runningStateHash,resultStatementCache), from_=p):		# Configuration Request from client/replicas
+        pid = reverseServerDict[p]
+        output("Received Running State Hash from replica /////////////////////: ",str(p),runningStateHash[0])
+        logger.info('Olympus: '+str(olympus)+' Olympus received Running State Hash from replica '+str(runningStateHash[0]))
+        self.caughtUpCount+=1
+        self.replicaResultStatementCache[pid] = resultStatementCache 
+        if pid in selectedQuorum:
+            runningStateHashes.add(runningStateHash)
+
+    def verifySigned(signedData,signerPublicKey):
+        verify_key = nacl.signing.VerifyKey(signerPublicKey, encoder=nacl.encoding.HexEncoder)
+        res = None
+        try:
+            res = verify_key.verify(signedData)
+            res = tuple(json.loads(res))
+        except:
+            output("Not able to authenticate result statement at Olympus. Dropping it")
+        return res
+
+
+    def sendClientResult():
+        clientResults = dict()
+        if replicaResultStatementCache[selectedQuorum[0]] != None:
+          for cid in replicaResultStatementCache[selectedQuorum[0]]:
+            slot = replicaResultStatementCache[selectedQuorum[0]][cid][0]
+            req = replicaResultStatementCache[selectedQuorum[0]][cid][1]
+            result = replicaResultStatementCache[selectedQuorum[0]][cid][2]
+            resStatement = verifySigned(replicaResultStatementCache[selectedQuorum[0]][cid][3],public_keys[serverList[selectedQuorum[0]]])
+            output("::::::::::::::::::::::::::::::::::::: Olympus is sending result to client for pending requests",slot,req,result,)
+            logger.info('Olympus: '+str(olympus)+' Olympus is sending result to client for pending requests '+str(result))
+            flag = 0
+            for rid in selectedQuorum[1:]:
+                try:
+                    output("::::::::::::::::::::::::::::::::::::: Olympus sending result to client:",replicaResultStatementCache[rid][cid][0],replicaResultStatementCache[rid][cid][2])
+                    resStatement_ = verifySigned(replicaResultStatementCache[rid][cid][3],public_keys[serverList[rid]])
+                    if slot!=replicaResultStatementCache[rid][cid][0] or result!=replicaResultStatementCache[rid][cid][2] or resStatement!=resStatement_:
+                        output("::::::::::::::::::::::::::::::::::::: Some isseue in sending result to client",replicaResultStatementCache[rid][cid][0],replicaResultStatementCache[rid][cid][2])
+                        flag = 1
+                        break
+                except:
+                    flag = 1
+                    break
+            if flag == 0:
+                output("Sending Olympus Result to client for Request:",req," Result: ",result)
+                logger.info('Olympus: '+str(olympus)+' Olympus sent result to client for pending request: '+str(req)+'Result:'+str(result))
+                output("::::::::::::::::::::::::::::::::::::: Olympus sending Result",result)
+                send(('Olympus Result',req,result), to=clientList[cid])
+
+    def merge_two_dicts(x, y):
+        z = x.copy()   # start with x's keys and values
+        z.update(y)    # modifies z with y's keys and values & returns None
+        return z
+
+    def receive(msg=('Client Dict',clientDict), from_=p):		# Configuration Request from client/replicas
+        self.clientDicts = merge_two_dicts(self.clientDicts,clientDict)
+        output("OLYMPUS!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!OLYMOUS!!!!!! GOT CLIENT DICT i.e. Matcher",self.clientDicts,clientDict,str(p))
+        logger.info('Olympus: '+str(olympus)+' Merged Dict. from Clients: '+str(self.clientDicts))
+
+
+    def receive(msg=('ret_running_state',runningState), from_=p):		# Configuration Request from client/replicas
+        output("::::::::::::::::::::::::::::::::::::: GOT RUNNING STATE",runningState)
+        logger.info('Olympus: '+str(olympus)+' Got running state as reply to get running state from replica' + str(p)+ str(runningState))
+        self.replicaRunningState = runningState
+    

@@ -1,0 +1,729 @@
+#!/usr/bin/env python3
+
+import sys
+import json
+import pickle
+import re
+import itertools
+import heapq
+import time
+import random
+import string
+import collections
+import nacl.encoding
+import nacl.signing
+from nacl.hash import blake2b
+from nacl.bindings.utils import sodium_memcmp
+import nacl.hash
+import json
+import logging
+import os.path
+from datetime import datetime
+from collections import defaultdict
+import os
+CLIENT = import_da('client')
+#import_da('olympus')
+REPLACER = import_da('header')
+
+HASHER = nacl.hash.sha256
+config(channel="fifo")
+
+class ServerMode:
+    PENDING = 0
+    ACTIVE = 1
+    IMMUTABLE = 2
+
+# Server class for handling requests from client
+class Server(process):
+    # setup the server process
+    def setup(clientList, serverList_, olympus, serverId, signing_key, public_keys, pre, suc, client_public_keys,replica_timeout, olympusPublicKey, reT,failures_dict,rState,rsHash,configID,checkpt_interval):
+        self.rDic = {'(':'',')':'','\'':'','put':'','get':'','slice':'','append':''}
+        self.serverList = serverList_
+        self.numReplicas = 0
+        self.serverID = serverId
+        self.pred = None
+        self.succ = None
+        self.signing_key = signing_key
+        self.public_keys = public_keys
+        self.slot_number = -1
+        self.mode = ServerMode.ACTIVE                        # pending = 0, active = 1, immutable = 2
+        self.logs = []
+        self.logger = logging.getLogger()
+        self.requestDict = dict()			     # requests received. key = (clientId, requestId), value = request
+        self.slotDict = dict()			             # requests received. key = slot number, value = (clientId, requestId)
+        self.resultDict = dict()		             # results stored for requests.  key = (clientId, requestId), value = result i.e cached result
+        self.resultShuttleDict = dict()			     # results stored for requests.  key = (clientId, requestId), value = result Shuttle (OP,RP)
+        self.resultStatementCache = dict()		     # result statement stored for each client for last executed request. key = client, value = slot_num, req, res, res statement
+        self.objectDict = dict()		             # dict for storing results of operations
+        self.client_public_keys = client_public_keys
+        self.timeout = replica_timeout
+        self.failures_dict = failures_dict
+        self.olympusPublicKey = olympusPublicKey
+        self.history = []
+        self.checkPointSlot = checkpt_interval
+        self.cachedCheckPointProof = None
+        self.checkPointHistory = []   # for wedge response
+        self.runningState = None
+        self.faultTriggers = defaultdict(int)
+        self.configID = configID
+        self.checkPointNumber = -1
+        self.completedCheckPointNumber = -1
+        self.catch_up_requests = dict()
+    def prepareServerMap():
+        if(pre == None):
+            self.pred = None
+            self.succ = (suc, serverList[suc])
+        elif(suc == None):
+            self.succ = None
+            self.pred = (pre, serverList[pre])
+        else:
+            self.pred = (pre, serverList[pre])
+            self.succ = (suc, serverList[suc])
+
+    def run():
+        print("I AM REPLICA: ",self.serverID,"and contains failure dict: ",self.failures_dict, rState,rsHash)
+        if ('new_configuration',('-1','0')) in self.failures_dict:
+                failType = self.failures_dict[('new_configuration',('-1','0'))]
+                self.faultTriggers[failType] +=1
+                if check_all_failures(failType) == True:
+                    return
+
+        self.objectDict = rState
+        self.numReplicas = len(self.serverList)
+        config(channel="fifo")
+        logpath = './logs'
+        logfile = 'Server_'+str(serverID)+'.log'
+        fh = logging.FileHandler(os.path.join(logpath,logfile))
+        formatter = logging.Formatter('%(asctime)s - %(processName)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        logger.setLevel(logging.DEBUG)
+        prepareServerMap()
+
+        if(await(False)): pass
+        logger.info('Server: '+str(self)+' EXITING ')
+        output("Server Exiting!")
+
+    def processRequest(req):
+            logger.info('Server: '+str(self)+' Processing Client Request and adding operation to its running state. Operation '+str(req))
+            result = ""
+            if "put" in req:
+                req = REPLACER.multiReplace(req,rDic)
+                req = req.split(',')
+                objectDict[str(req[0])] = str(req[1])
+                result = "OK"
+            elif "get" in req:
+                req = REPLACER.multiReplace(req,rDic)
+                req = str(req)
+                if req in objectDict:
+                    result = objectDict[req]
+            elif "append" in req:
+                req = REPLACER.multiReplace(req,rDic)
+                req = req.split(',')
+                if str(req[0]) in objectDict:
+                    objectDict[str(req[0])] = "".join((objectDict[str(req[0])],(str(req[1]))))
+                    result = "OK"
+                else:
+                    result = "FAIL"
+            elif "slice" in req:
+                req = REPLACER.multiReplace(req,rDic)
+                req = req.split(',')
+                a,b = req[1].split(':')
+                if str(req[0]) in objectDict:
+                    objectDict[str(req[0])] = objectDict[str(req[0])][int(a):int(b)]
+                    result = "OK"
+                else:
+                    result = "FAIL"
+            logger.info('Server: '+str(self)+' Result of operation: '+str(result))
+            return result
+
+    def getSlot(cId,rId):
+        self.slot_number += 1
+        slotDict[self.slot_number] = (cId,rId)
+        return (self.slot_number,(cId,rId))		# Calculate hash and return hash as slot 
+
+    def check_extra_op():
+        if "extra_op()" in self.faultTriggers and self.faultTriggers["extra_op()"]>0:
+            self.faultTriggers["extra_op()"]-=1
+            result = processRequest("put('a','a')")
+
+    def check_invalid_order_sig():
+        faulty_signing_key = signing_key
+        if "invalid_order_sig()" in self.faultTriggers and self.faultTriggers["invalid_order_sig()"]>0:
+            self.faultTriggers["invalid_order_sig()"]-=1
+            faulty_signing_key = nacl.signing.SigningKey.generate()
+        return faulty_signing_key
+
+    def check_invalid_result_sig():
+        faulty_signing_key = signing_key
+        if succ!=None and "invalid_result_sig()" in self.faultTriggers and self.faultTriggers["invalid_result_sig()"]>0:
+            self.faultTriggers["invalid_result_sig()"]-=1
+            faulty_signing_key = nacl.signing.SigningKey.generate()
+        return faulty_signing_key
+
+    def check_all_failures(failType):
+        if failType == "crash()":
+            output("SERVER ",str(self),"CRASHING NOW!! ERRORRORRORR")
+            self.faultTriggers[failType] -=1
+            logging.shutdown()
+            os._exit(-1)
+        if failType == "extra_op()":
+            self.faultTriggers[failType] -=1
+            processRequest("put('a','a')")
+        if failType == "drop()":
+            output("Replica:",str(self),"Dropping the message whatever it is")
+            self.faultTriggers[failType] -=1
+            return True
+        if "sleep" in failType:
+            output("Replica:",str(self),"Sleeping now!!")
+            self.faultTriggers[failType] -=1
+            n = int(failType.split('(')[1].split(')')[0])
+            time.sleep(n)
+        return False
+
+    # Process new request from client 
+    def processClientRequest(request,p):
+ 
+        logger.info('Server: '+str(self)+' Received New Request from Client: '+ str(p) + ' Request: '+str(request))
+        output("Received New Request from Client: ",p,"Request:",request[2],type(request[2]))
+        if self.mode == ServerMode.ACTIVE:			# Server Mode is Active
+            failType = ""
+            if ('client_request',(str(request[0]),str(request[1]))) in self.failures_dict:
+                failType = self.failures_dict[('client_request',(str(request[0]),str(request[1])))]
+                self.faultTriggers[failType] +=1
+                output("TTTTTTTTTTTTTTTTTTTTTTTTTTT",self.faultTriggers)
+                if check_all_failures(failType) == True:
+                    return
+            if "increment_slot()" in self.faultTriggers and self.faultTriggers["increment_slot()"]>0:
+                output("TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTriggeered it")
+                self.faultTriggers["increment_slot()"]-=1
+                self.slot_number +=1
+            faultyRequest = request
+            if "change_operation()" in self.faultTriggers and self.faultTriggers["change_operation()"]>0:
+                faultyRequest = (request[0],request[1],"get"+"(\'"+"x"+"\')")
+                self.faultTriggers["change_operation()"]-=1
+
+            slot_num,slot_ = getSlot(request[0],request[1])
+            requestDict[slot_] = request[2]			# Add request to request dictionary
+            faulty_signing_key = check_invalid_order_sig()
+
+            orderStatement = (slot_num,faultyRequest)		# signed(s,o) pair consitutes order statement
+            os2jsonstr = json.dumps(orderStatement)		# convert order statement to json string to sign it
+            signedOrderStatement = faulty_signing_key.sign(os2jsonstr.encode())
+            signedOrderStatementsList = []
+            signedOrderStatementsList.append(signedOrderStatement)
+            result = processRequest(request[2])			# process request and obtain result i.e apply o to its running state and obtain result r
+            orderProof = (slot_num,request,signedOrderStatementsList) 
+            resultDict[slot_] = result						# add result to result dict
+            faultyResult = result
+
+            resultHash = HASHER(faultyResult.encode(), encoder=nacl.encoding.HexEncoder)
+
+            faulty_signing_key = check_invalid_result_sig()
+            resultStatement = (faultyRequest,str(resultHash))
+            rs2jsonstr = json.dumps(resultStatement)		# convert result statement to json string to sign it
+            signedResultStatement = faulty_signing_key.sign(rs2jsonstr.encode())
+
+            signedResultStatementsList = []
+            signedResultStatementsList.append(signedResultStatement)
+            resultProof = (slot_num,request,signedResultStatementsList)
+            logger.info('Server: '+str(self)+' Signed Order Statement and Result Statement for slot_num '+ str(slot_num) + ' Request: '+str(request))
+  
+            shuttle = (orderProof,resultProof)
+            self.history.append(orderProof)
+            self.resultStatementCache[request[0]] = (slot_num,request,result,signedResultStatement)
+            
+
+            if succ!=None:									    # Not the last node. i.e. replicas config has more than one replicas
+                output("Sending Shuttle to: ",succ[1])
+                logger.info('Server: '+str(self)+' Sending shuttle along the chain to: '+ str(succ[1]))
+                send(('Shuttle',shuttle,p), to=succ[1])					    # send shuttles along the chain
+            elif succ==None:								    # the only server case .
+                logger.info('Server: '+str(self)+' Sending Response to Client: '+ str(p) +' Result: '+ str(result))
+                send(('Response',result,resultProof), to=p)
+            if slot_number and (slot_num%checkPointSlot) == 0:
+                self.runningState = self.objectDict
+                initiateCheckpoint(slot_num-1)
+        
+        elif self.mode == ServerMode.IMMUTABLE:
+                logger.info('Server: '+str(self)+' Servers state is IMMUTABLE. Reconfiguration in Progess ')
+                output("Got new request from client: ",str(p),"Request : ",request,"Sending ERROR as Result as Reconfiguration is in progress!!")
+                send(('Response',"ERROR",request), to=p)
+
+    # check validity of order proof
+    def checkOrderProofValidity(shuttle,p):
+        orderProof = shuttle[0] 
+        slot_num = orderProof[0]
+        if(self.slot_number+1!=slot_num):
+             logger.critical('Server: '+str(self)+' Slot number sequence Error. Will lead to Holes in History. OrderProof from '+str(p))
+             output("!!!!!!!!     MAJOR PROBLEM HERE . HOLES IN HISTORY  !!!!!!!!!, OrderProof from:",p,orderProof)
+             send(('Reconfiguration',), to=olympus)
+             return False
+        slot_ = (orderProof[1][0],orderProof[1][1])
+        request = orderProof[1][2]
+        i = 0
+        osOperationSet = set()
+        for sOs in orderProof[2]:    # signed order statements
+            verify_key = nacl.signing.VerifyKey(public_keys[serverList[i]], encoder=nacl.encoding.HexEncoder)
+            try:
+            	os = verify_key.verify(sOs)
+            except:
+                output("Signature verification of Order Proof failed for:",request,"Raising Reconfiguration Request")
+                logger.error('Server: '+str(self)+' Signature verification of Order Proof failed for: '+ str(request) +' Raising Reconfiguration Request ')
+                send(('Reconfiguration',), to=olympus)
+                return False
+
+            logger.info('Server: '+str(self)+' Signature verification of Order Proof passed for: '+ str(request) +' received from '+str(p))
+            os = json.loads(os)
+            output(orderProof[0],orderProof[1])
+            
+            osOperationSet.add((os[0],)+tuple(os[1]))
+            if os[0]!=slot_num or tuple(os[1])!=orderProof[1] or len(osOperationSet) != 1:
+                output("!!!!!!!!!!!!! Invalid Order Proof !!!!!!!!!!, Received from",p,os[0],slot_num,tuple(os[1]),orderProof[1],len(osOperationSet))
+                logger.error('Server: '+str(self)+' Invalid Order Proof Received from '+str(p)+ ' Raising Reconfiguration Request ')
+                send(('Reconfiguration',), to=olympus)
+                return False
+            logger.info('Server: '+str(self)+' Order Proof Valid for: '+ str(request) +' received from '+str(p))
+            i+=1						
+        return True
+
+    # Process retransmission request from client
+    def processRetransmissionRequest(request,p):
+        reqKey = (request[0],request[1])
+        output("Received Retransmission Request from : ",p,"Request:",request,reqKey)
+        logger.info('Server: '+str(self)+' Received Retransmission Request from Client: '+ str(request))
+        client_p = clientList[request[0]]				# client to which result will be sent
+        if self.mode == ServerMode.ACTIVE:				# Server Mode is Active
+            if self.pred != None:         				# I am not head
+                if reqKey in resultShuttleDict:                         # Case 1: it has cached the result shuttle corresponding to the operation
+                    logger.info('Server: '+str(self)+' Found Result Shuttle for Retransmitted Request in Cache. Request '+ str(request[2]+ ' Result ')+str(resultDict[reqKey]))
+                    output("Found Result for Retransmitted Request in Cache",resultDict[reqKey])
+                    send(('Retransmitted Response',resultDict[reqKey],resultShuttleDict[reqKey][1]), to=client_p)
+                else:
+                    logger.info('Server: '+str(self)+' Result Shuttle for Retransmitted Request NOT in Cache. Sending Retransmission Request to Head ')
+                    output("Result not found in cache and sending retransmission request to head")
+                    send(('iRetransmissionRequest',request), to=serverList[0])    				# send retransmission request to head
+                    if(await(reqKey in resultShuttleDict)):
+                        logger.info('Server: '+str(self)+' Result Shuttle arrived for Retransmitted Request '+ str(request[2]+ ' Result ')+str(resultDict[reqKey]))
+                        output("I am non HEAD - Result Shuttle arrived for Retransmitted Request ",str(request[2]))
+                        send(('Retransmitted Response',resultDict[reqKey],resultShuttleDict[reqKey][1]), to=client_p)
+                    elif(timeout(self.timeout)):
+                        logger.info('Server: '+str(self)+' Case1: Retransmission Timer Expired! Sending Reconfig Request to Olympus ')
+                        output('Server: '+str(self)+'Case1: Retransmission Timer Expired! Sending Reconfig Request to Olympus ',str(request[2]))
+                        send(('Reconfiguration',), to=olympus)
+            else:       							# I am head
+                if reqKey in requestDict:
+                    if reqKey in resultShuttleDict:				# Case 1: it has cached the result shuttle corresponding to the operation
+                        logger.info('Server: '+str(self)+' Found Result Shuttle for Retransmitted Request in Cache. Request '+ str(request[2]+ ' Result ')+str(resultDict[reqKey]))
+                        output("Found Result for Request in cache. Request was a retransmitted request")
+                        send(('Retransmitted Response',resultDict[reqKey],resultShuttleDict[reqKey][1]), to=client_p)
+                    else:							# Case 2: it has ordered the operation but is still waiting for the result shuttle to come back
+                        logger.info('Server: '+str(self)+' Result Shuttle for Retransmitted Request NOT in Cache. Waiting for Result Shuttle to come for Request '+str(request))
+                        output("Result not found in cache and I am head. i.e. waiting for result shuttle")
+                        if(await(reqKey in resultShuttleDict)):
+                            #output("Result Shuttle arrived for Retransmitted Request")
+                            output("I am head - Result Shuttle arrived for Retransmitted Request",str(request[2]))
+                            logger.info('Server: '+str(self)+' Result Shuttle arrived for Retransmitted Request '+ str(request[2]+ ' Result ')+str(resultDict[reqKey]))
+                            send(('Retransmitted Response',resultDict[reqKey],resultShuttleDict[reqKey][1]), to=client_p)
+                        elif(timeout(self.timeout)):
+                            logger.info('Server: '+str(self)+' Retransmission Timer Expired! Sending Reconfig Request to Olympus ')
+                            output('Server: '+str(self)+'Case2: Retransmission Timer Expired! Sending Reconfig Request to Olympus ',str(request[2]))
+                            send(('Reconfiguration',), to=olympus)
+                else:								# Case 3: Operation not recognized
+                    output("Case 3. HEAD does not recognize the operation")
+                    logger.info('Server: '+str(self)+' No operation for Retransmitted Request in History. Starting Afresh '+ str(request[2]))
+                    processClientRequest(request,client_p)
+                    if(await(reqKey in resultShuttleDict)):
+                        output("Result Shuttle arrived for Retransmitted Request")
+                        logger.info('Server: '+str(self)+' Result Shuttle arrived for Retransmitted Request '+ str(request[2]+ ' Result ')+str(resultDict[reqKey]))
+                        send(('Retransmitted Response',resultDict[reqKey],resultShuttleDict[reqKey][1]), to=client_p)
+                    elif(timeout(self.timeout)):
+                        logger.info('Server: '+str(self)+' Retransmission Timer Expired! Sending Reconfig Request to Olympus ')
+                        send(('Reconfiguration',), to=olympus)
+ 
+        elif self.mode == ServerMode.IMMUTABLE:
+                logger.info('Server: '+str(self)+' Server is IMMUTABLE. Reconfiguration in Progress ')
+                send(('Response',"ERROR",request), to=client_p)
+        
+    def verifyClientRequest(signedRequest,signerPublicKey,p):
+        verify_key = nacl.signing.VerifyKey(signerPublicKey, encoder=nacl.encoding.HexEncoder)
+        req = None
+        try:
+            req = verify_key.verify(signedRequest)
+            req = tuple(json.loads(req))
+        except:
+            output("Not able to authenticate client request from Client: ",p,"Signed Request: ",signedRequest,"Dropping it!!")
+        return req
+
+    # Receive handler for handling requests from clients.
+    def receive(msg=('Request',request), from_=p): 
+        request = verifyClientRequest(request,self.client_public_keys[p],p)
+        if request!=None:
+            processClientRequest(request,p)
+    
+    def receive(msg=('RetransmissionRequest',request), from_=p): 
+        request = verifyClientRequest(request,self.client_public_keys[p],p)
+        if request!=None:
+            processRetransmissionRequest(request,p)
+    def receive(msg=('iRetransmissionRequest',request), from_=p): 
+        if ('forwarded_request',(str(request[0]),str(request[1]))) in self.failures_dict:
+            failType = self.failures_dict[('forwarded_request',(str(request[0]),str(request[1])))]
+            self.faultTriggers[failType] +=1
+            if check_all_failures(failType) == True:
+                return
+        processRetransmissionRequest(request,p)
+    
+    # Receive handler for handling requests from preceding replicas.
+    def receive(msg=('Shuttle',shuttle,client), from_=p):
+        if self.mode == ServerMode.ACTIVE:			# Server Mode is Active
+            output("Received shuttle from server",p," and you know my pred",self.pred,shuttle[0][1])
+            logger.info('Server: '+str(self)+' Received Shuttle from Pred '+ str(self.pred))
+            isOPValid = checkOrderProofValidity(shuttle,p)
+            if isOPValid == False:
+                return
+        
+            orderProof = shuttle[0]
+            request = orderProof[1]
+
+            if ('shuttle',(str(request[0]),str(request[1]))) in self.failures_dict:
+                failType = self.failures_dict[('shuttle',(str(request[0]),str(request[1])))]
+                self.faultTriggers[failType] +=1
+                if check_all_failures(failType) == True:
+                    return
+            slot_num,slot_ = getSlot(request[0],request[1])
+
+            faultyRequest = request
+            if "change_operation()" in self.faultTriggers and self.faultTriggers["change_operation()"]>0:
+                faultyRequest = (request[0],request[1],"get"+"(\'"+"x"+"\')")
+                self.faultTriggers["change_operation()"]-=1
+
+            faulty_signing_key = check_invalid_order_sig()
+            requestDict[slot_] = request[2]			      # Add request to request dictionary.
+            orderStatement = (slot_num,faultyRequest)             # signed(s,o) pair consitutes order statement
+            os2jsonstr = json.dumps(orderStatement)		# convert order statement to json string to sign it
+            signedOrderStatement = faulty_signing_key.sign(os2jsonstr.encode())
+            signedOrderStatementsList = orderProof[2]
+            signedOrderStatementsList.append(signedOrderStatement)
+            result = processRequest(request[2])			# process request and obtain result i.e apply o to its running state and obtain result r
+        
+            resultProof = shuttle[1]
+            resultDict[slot_] = result						# add result to result dict
+            faultyResult = result
+            resultHash = HASHER(faultyResult.encode(), encoder=nacl.encoding.HexEncoder)
+            resultStatement = (faultyRequest,str(resultHash))
+           
+            faulty_signing_key = check_invalid_result_sig()
+            logger.info('Server: '+str(self)+' Calculated Hash of Result. Hash '+str(resultHash))
+            rs2jsonstr = json.dumps(resultStatement)		# convert result statement to json string to sign it
+            signedResultStatement = faulty_signing_key.sign(rs2jsonstr.encode())
+            signedResultStatementsList = resultProof[2]
+            signedResultStatementsList.append(signedResultStatement)
+            shuttle = (orderProof,resultProof) 
+            self.resultStatementCache[request[0]] = (slot_num,request,result,signedResultStatement)
+            self.history.append(orderProof)
+
+            if self.slot_number and (slot_num%checkPointSlot) == 0:
+                self.runningState = self.objectDict
+                if self.cachedCheckPointProof != None:
+                    processCheckPointShuttle(self.cachedCheckPointProof) 
+        
+            if succ==None:										# Tail
+                logger.info('Server: '+str(self)+' Sending Response to Client: '+ str(client) +' Result: '+ str(result) + ' for Request ' + str(request))
+                resultShuttleDict[slot_] = shuttle
+                if reT:
+                    if(await(False)): pass
+                    elif(timeout(3)): pass      # to test timeouts
+ 
+                if ('result_shuttle',(str(request[0]),str(request[1]))) in self.failures_dict:
+                    failType = self.failures_dict[('result_shuttle',(str(request[0]),str(request[1])))]
+                    self.faultTriggers[failType] +=1      
+                    if check_all_failures(failType) == True:
+                        return
+
+                isRPValid = checkResultProofValidity(shuttle,self)
+                if isRPValid == False:
+                    output("Raising Request Reconfiguration!!")
+                    return #raiseReconfigurationRequest("PROOF")
+
+
+                if "drop_result_stmt()" in self.faultTriggers and self.faultTriggers["drop_result_stmt()"]>0:
+                    self.faultTriggers["drop_result_stmt()"]-=1
+                    shuttle[1][2].pop(0)
+
+                if "change_result()" in self.faultTriggers and self.faultTriggers["change_result()"]>0:
+                    self.faultTriggers["change_result()"]-=1
+                    hash_ = HASHER("OK".encode(), encoder=nacl.encoding.HexEncoder)
+                    rS_ = (shuttle[1][1],str(hash_))   
+                    sRS_ = signing_key.sign(json.dumps(rS_).encode())
+                    shuttle[1][2][serverID] = sRS_
+
+                res_proof = shuttle[1]
+                if "invalid_result_sig()" in self.faultTriggers and self.faultTriggers["invalid_result_sig()"]>0:
+                    self.faultTriggers["invalid_result_sig()"]-=1
+                    faulty_signing_key_ = nacl.signing.SigningKey.generate()
+                    signedResultStatement_ = faulty_signing_key_.sign(rs2jsonstr.encode())
+                    res_proof[2][-1] = signedResultStatement_
+                 
+                output("SENDING Response to Client for Request",shuttle[0][1],"Result",result)
+                send(('Response',result,res_proof), to=client)         			# send result along with result proof to client
+                if pred!=None:									# if Pred exists return the shuttle
+                    logger.info('Server: '+str(self)+' Sending Result shuttle along the chain to: '+ str(pred[1])+' for Req. '+ str(request))
+                    send(('Result Shuttle',shuttle), to=pred[1])
+
+                output("-------------------  SERVER STATE  ------------------------   ",objectDict)
+                logger.info('Server: '+str(self)+' Server State '+str(objectDict))
+            else:
+                logger.info('Server: '+str(self)+' Sending shuttle along the chain to: '+ str(succ[1])+' for Req. '+ str(request))
+                send(('Shuttle',shuttle,client), to=succ[1])
+    
+    def checkResultProofValidity(shuttle,p):
+        resultProof = shuttle[1]
+        request = resultProof[1]
+        slot_ = (request[0],request[1])
+        orig_dgs = HASHER(resultDict[slot_].encode(),encoder=nacl.encoding.HexEncoder)
+        i=0
+        rsOperationSet = set()
+        for sRs in resultProof[2]:
+            verify_key = nacl.signing.VerifyKey(public_keys[serverList[i]], encoder=nacl.encoding.HexEncoder)
+            try:
+                re_ = verify_key.verify(resultProof[2][i])
+            except:
+                output("Signature verification of Result Proof failed for:",request,"Raising Reconfiguration Request")
+                logger.error('Server: '+str(self)+' Signature verification of Result Proof failed for: '+ str(request) +' Raising Reconfiguration Request ')
+                send(('Reconfiguration',), to=olympus) 
+                return False
+            rsOperationSet.add(re_)
+            re_ = json.loads(re_)
+            if str(re_[1])!=str(orig_dgs):
+                output("Cryptographic hash mismatch error. Result's integrity has been compromised. Message Digest check fails")
+                logger.error('Server: '+str(self)+' Result Proofs cryptographic hash mismatch error. Integrity has been compromised')
+                send(('Reconfiguration',), to=olympus) 
+                return False
+            if tuple(re_[0])!=request or len(rsOperationSet)!=1:
+                output("!!!!!!!!!!!!! xxxxxx Invalid Result Proof xxxxxx !!!!!!!!!!, Received from",p, re_[0],request)
+                logger.error('Server: '+str(self)+' Invalid Result Proof Received from '+str(p)+ ' Raising Reconfiguration Request ')
+                send(('Reconfiguration',), to=olympus)
+                return False
+            i+=1
+        logger.info('Server: '+str(self)+' Result Proof Verified')
+        return True
+    
+    # Receive handler for handling result shuttle.
+    def receive(msg=('Result Shuttle',shuttle), from_=p):
+        if self.mode == ServerMode.ACTIVE:			# Server Mode is Active
+ 
+            output("************ Received Result Shuttle from server and you know my Succ, **********",p,self.succ)
+            logger.info('Server: '+str(self)+' Received Result Shuttle from Server' + str(p))
+            resultProof = shuttle[1]
+            request = resultProof[1]
+          
+            if ('result_shuttle',(str(request[0]),str(request[1]))) in self.failures_dict:
+                failType = self.failures_dict[('result_shuttle',(str(request[0]),str(request[1])))]
+                self.faultTriggers[failType] +=1      
+                if check_all_failures(failType) == True:
+                    return
+ 
+            isRPValid = checkResultProofValidity(shuttle,p)
+            if isRPValid == False:
+                output("Raising Request Reconfiguration!!")
+                return
+       
+            slot_ = (request[0],request[1])
+            resultShuttleDict[slot_] = shuttle
+            
+
+            if "drop_result_stmt()" in self.faultTriggers and self.faultTriggers["drop_result_stmt()"]>0:
+                output("<>","Fault drop_result_stmt() successfully injected. Dropping Head's Result Statement from the Result Proof at Server",str(self))
+                self.faultTriggers["drop_result_stmt()"]-=1
+                shuttle[1][2].pop(0)
+            
+            if "change_result()" in self.faultTriggers and self.faultTriggers["change_result()"]>0:
+                self.faultTriggers["change_result()"]-=1
+                hash_ = HASHER("OK".encode(), encoder=nacl.encoding.HexEncoder)
+                rS_ = (shuttle[1][1],str(hash_)) 
+                sRS_ = signing_key.sign(json.dumps(rS_).encode())
+                shuttle[1][2][serverID] = sRS_
+            if pred != None:
+                logger.info('Server: '+str(self)+' Sending Result shuttle along the chain to: '+ str(pred[1])+' for Req. '+ str(request))
+                send(('Result Shuttle',shuttle), to=pred[1])
+
+    def receive(msg=('Wedge Request',signedWedgeRequest), from_=p):
+        if ('wedge_request',('-1','0')) in self.failures_dict:
+                failType = self.failures_dict[('wedge_request',('-1','0'))]
+                self.faultTriggers[failType] +=1
+                if check_all_failures(failType) == True:
+                    return
+
+        verify_key = nacl.signing.VerifyKey(self.olympusPublicKey, encoder=nacl.encoding.HexEncoder)
+        try:
+            wedge_req = verify_key.verify(signedWedgeRequest)
+        except:
+            output("Not able to authenticate wedge request. Dropping it")
+            return
+        logger.info('Server: '+str(self)+' Received wedge request from Olympus. Request'+str(wedge_req))
+        output("Received wedge request from Olympus: ",p,"Wedge Request: ",str(wedge_req))
+        sendWedgeStatement(signedWedgeRequest)
+        
+    def sendWedgeStatement(signedWedgeRequest):
+        trh = [k for k in self.faultTriggers.keys() if 'truncate_history' in k]
+        sendHistory = self.history
+        if len(trh)!=0 and self.faultTriggers[trh[0]]>0:
+                self.faultTriggers[trh[0]]-=1
+                n = int(trh[0].split('(')[1].split(')')[0])
+                output("BHAI LOG YELO 2:  ",trh,trh[0],n)
+                sendHistory = sendHistory[0:-n]
+        logger.info('Server: '+str(self)+' Sending Wedge Response and changing the Server Mode to IMMUTABLE. history:'+str(sendHistory))
+        send(('Wedge Response',self.checkPointHistory,sendHistory), to=olympus)		# Send replica list
+        self.mode = ServerMode.IMMUTABLE
+        
+
+    def raiseReconfigurationRequest(proof): pass
+    
+    def truncateHistory(checkPointProof):
+        k = 0
+        cpStatements = set() 
+        for i in checkPointProof[1]:
+            verify_key = nacl.signing.VerifyKey(public_keys[serverList[k]], encoder=nacl.encoding.HexEncoder)
+            try:
+               re_ = verify_key.verify(i)
+            except:
+               output("Signature Mismatch in Checkpoint Shuttle. Dropping!!")
+               logger.info('Server: '+str(self)+' Signature Mismatch while truncating history. Leaving'+str(checkPointProof))
+               send(('Reconfiguration',), to=olympus)
+               return
+            cpStatements.add(re_)
+            output("Checkpoint Shuttle Reached. Contents of Checkpoint Shuttle",re_)
+            k += 1
+        if len(cpStatements) > (self.numReplicas/2)+1:
+            output("Checkpointproof validation fails. Contains different checkpoint statements !!",len(cpStatements))
+            logger.info('Server: '+str(self)+' Check point Proof Validation Fails. Check Point contains different checkpoint statements'+str(checkPointProof))
+            return
+        k = 0
+        for orderProof in history:
+            if orderProof[0] > checkPointProof[0]:
+                break
+            k += 1
+        history = history[k:]
+ 
+    def receive(msg=('Return Checkpoint Shuttle',checkPointProof), from_=p):
+        self.completedCheckPointNumber +=1
+        if ('completed_checkpoint',('-1',str(self.completedCheckPointNumber))) in self.failures_dict:
+                failType = self.failures_dict[('completed_checkpoint',('-1',str(self.completedCheckPointNumber)))]
+                self.faultTriggers[failType] +=1
+                if check_all_failures(failType) == True:
+                    return
+        output("Received Return checkpoint shuttle from process",p)
+        logger.info('Server: '+str(self)+' Received Return Checkpoint Shuttle: Checkpoint Proof:'+str(checkPointProof))
+        truncateHistory(checkPointProof)
+        checkPointHistory.append(checkPointProof)
+        if "drop_checkpt_stmts()" in self.faultTriggers and self.faultTriggers["drop_checkpt_stmts()"]>0:
+            self.faultTriggers["drop_checkpt_stmts()"]-=1
+            t = self.numReplicas/2
+            checkPointProof[1] = checkPointProof[1][t+1:]
+        if pred != None:
+            logger.info('Server: '+str(self)+' Sending Return Checkpoint Shuttle'+str(checkPointProof))
+            send(('Return Checkpoint Shuttle',checkPointProof), to=pred[1])
+
+    def processCheckPointShuttle(checkPointProof):
+        if self.slot_number <= checkPointProof[0]:
+            self.cachedCheckPointProof = checkPointProof
+            output("ISSUE!!!!!1111  Received checkpoint shuttle from process")
+            return
+
+        runningState2jsonstr = json.dumps(runningState)
+        runningStateHash = HASHER(runningState2jsonstr.encode(), encoder=nacl.encoding.HexEncoder)
+        checkPointStatement = (checkPointProof[0],str(runningStateHash))
+        cps2jsonstr = json.dumps(checkPointStatement)
+        signedCheckPointStatement = signing_key.sign(cps2jsonstr.encode())
+        checkPointStatementList = checkPointProof[1]
+        checkPointStatementList.append(signedCheckPointStatement)
+        checkPointProof = (checkPointProof[0],checkPointStatementList)
+        if succ==None:                                                                          # Tail
+            self.completedCheckPointNumber +=1
+            truncateHistory(checkPointProof) 
+            checkPointHistory.append(checkPointProof)
+            logger.info('Server: '+str(self)+' Sending Return Checkpoint Shuttle'+str(checkPointProof))
+            send(('Return Checkpoint Shuttle',checkPointProof), to=pred[1])
+        else:
+            send(('Checkpoint Shuttle',checkPointProof), to=succ[1])
+            logger.info('Server: '+str(self)+' Sending Checkpoint Shuttle'+str(checkPointProof))
+        self.cachedCheckPointProof = None
+    
+    def receive(msg=('Checkpoint Shuttle',checkPointProof), from_=p):
+        self.checkPointNumber +=1
+        if ('checkpoint',('-1',str(self.checkPointNumber))) in self.failures_dict:
+                failType = self.failures_dict[('checkpoint',('-1',str(self.checkPointNumber)))]
+                self.faultTriggers[failType] +=1
+                if check_all_failures(failType) == True:
+                    return
+        output("Received checkpoint shuttle from process",p)
+        logger.info('Server: '+str(self)+' Received Check Point Shuttle  along with checkpoint proof'+str(checkPointProof))
+        processCheckPointShuttle(checkPointProof)
+	
+    def initiateCheckpoint(checkpointSlotNumber):
+        if pred == None: 			# I am head
+            output("Head is initiating checkpoint till Slot Number",checkpointSlotNumber)
+            logger.info('Server: '+str(self)+' Head is initiating checkpoint till Slot Number'+str(checkpointSlotNumber))
+            runningState2jsonstr = json.dumps(runningState)
+            runningStateHash = HASHER(runningState2jsonstr.encode(), encoder=nacl.encoding.HexEncoder)
+            checkPointStatement = (checkpointSlotNumber,str(runningStateHash))
+            cps2jsonstr = json.dumps(checkPointStatement)
+            signedCheckPointStatement = signing_key.sign(cps2jsonstr.encode())
+            checkPointStatementList = []
+            checkPointStatementList.append(signedCheckPointStatement)
+            checkPointProof = (checkpointSlotNumber,checkPointStatementList)
+            logger.info('Server: '+str(self)+' Head is sending checkpoint proof along with check point shuttle'+str(checkPointProof))
+            self.checkPointNumber +=1
+            send(('Checkpoint Shuttle',checkPointProof), to=succ[1])
+
+
+
+    def receive(msg=('Catch Up',diffHistory), from_=p):
+        if ('catch_up',('-1','0')) in self.failures_dict:
+                failType = self.failures_dict[('catch_up',('-1','0'))]
+                self.faultTriggers[failType] +=1
+                if check_all_failures(failType) == True:
+                    return
+
+        output("Got Catch up from Olympus and operation//////////|||||||||/////////",str(p),diffHistory)
+        logger.info('Server: '+str(self)+' Got Catch up from Olympus and operation '+str(diffHistory))
+        x = 1
+        diffHistory = diffHistory[::-1]
+        for i in diffHistory:
+            operation = i[1]
+            output("Got Catch up from Olympus and operation is",operation[2])
+            if operation not in self.catch_up_requests.keys():
+                result = processRequest(operation[2])
+                self.catch_up_requests[operation] = result
+            result = self.catch_up_requests[operation]
+            rh = HASHER(result.encode(), encoder=nacl.encoding.HexEncoder)
+            rs = (operation, str(rh))
+            srs = signing_key.sign(json.dumps(rs).encode())
+            if slot_number+x != i[0]:
+                output("Though Replica is catching up there are issues! Major Issues! MAJOR MAJOR ISSUES!!!!!",slot_number,i[0])
+                logger.info('Server: '+str(self)+' Replica is catching up but there were holes in history '+str(diffHistory))
+            self.resultStatementCache[operation[0]] = (i[0],operation,result,srs)
+             
+        runningState2json = json.dumps(self.objectDict)
+        runningStateHash = HASHER(runningState2json.encode(), encoder=nacl.encoding.HexEncoder)
+        output("LETS PRINT RUNNING STATE FOR THE TIME:",str(self),self.objectDict)
+        logger.info('Server: '+str(self)+' Sending Running State Hash to Olympus in Caught Up Message'+str(runningStateHash))
+        output("1.Sending Running State Hash to Olympus /////////////////////: ",str(p),runningStateHash)
+        send(('Caught Up',runningStateHash,self.resultStatementCache), to=p)
+
+    def receive(msg=('get_running_state',), from_=p):
+        logger.info('Server: '+str(self)+' Got Get running state message from Olympus ')
+        if ('get_running_state',('-1','0')) in self.failures_dict:
+                failType = self.failures_dict[('get_running_state',('-1','0'))]
+                self.faultTriggers[failType] +=1
+                if check_all_failures(failType) == True:
+                    return
+        logger.info('Server: '+str(self)+' Sending running state to Olympus from Olympus '+str(self.objectDict))
+        send(('ret_running_state',self.objectDict), to=p)
+
+    def receive(msg=('KillURS',), from_=p):
+        logger.info('Server: '+str(self)+' Killing itself on instruction from Olympus')
+        output("Replica KILLING as instructed by Olympus")
+        logging.shutdown()
+        os._exit(-1)
+

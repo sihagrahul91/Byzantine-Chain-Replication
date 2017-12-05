@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+
+import sys
+import json
+import pickle
+import re
+import itertools
+import heapq
+import time
+import random
+import string
+import collections
+import nacl.encoding
+import nacl.signing
+from nacl.hash import blake2b
+from nacl.bindings.utils import sodium_memcmp
+import nacl.hash
+import json
+import logging
+import os.path
+from datetime import datetime
+OLYMPUS = import_da('olympus')
+SERVER = import_da('replica')
+HASHER = nacl.hash.sha256
+REPLACER = import_da('header')
+
+class Client(process):
+    # setup function for the client process
+    def setup(olympus:Olympus,reqs,cid,clientTimeout,signing_key,client_public_keys,clientList,signT):
+        self.serverList = []
+        self.numReplicas = 0
+        self.rDic = {'(':'',')':'','\'':'','put':'','get':'','slice':'','append':''}
+        self.reqs = processRequests(reqs)
+        self.head = None
+        self.tail = None
+        self.clientId = cid
+        self.numRetries = 3
+        self.resendDelay = 5		  		
+        self.clientTimeout = clientTimeout  		
+        self.resultDict = dict()
+        self.requests = dict()
+        self.result = None				
+        self.succ = None				
+        self.reqId = 0					# Request Identifier Counter. Starting from 0.
+        self.pendingResult = None 			# List containing pending requests identifier.
+        self.pendingRequest = None
+        self.public_keys = dict()
+        self.client_public_keys = client_public_keys
+        self.clientList = clientList
+        self.logger = logging.getLogger()
+        self.signT = signT
+        self.responsesCount = set()
+        self.replicaConfig = False
+        self.signing_key = signing_key
+        self.processedReqsCache = []
+    def processRequests(reqs):
+        if len(reqs)==1 and "pseudorandom" in reqs[0]:
+            if True:
+              if True:
+                  reqs_ = []      
+                  if "pseudorandom" in reqs[0]:
+                      v = reqs[0].strip('pseudorandom')[1:-1]
+                      seed,num = v.split(',')
+
+                      random.seed(int(seed))
+                      ops=random.sample(range(0,int(num)),int(num))
+                      opsDict = dict()
+                      maxm = 1
+                      k = cid
+                      for i in ops:
+                          if (i+k)%4 in opsDict:
+                              opsDict[(i+k)%4] += 1
+                              maxm = max(maxm,opsDict[(i+k)%4])
+                          else:
+                              opsDict[(i+k)%4] = 1
+                      putDict = dict()
+                      appendDict = dict()
+                      sliceDict = dict()
+                      getList = []
+                      for i in range(maxm):
+                          key = ''.join(random.choice(string.ascii_lowercase + string.ascii_uppercase + string.digits) for _ in range(6))
+                          val = ''.join(random.choice(string.ascii_lowercase + string.ascii_uppercase + string.digits) for _ in range(6))
+                          aval = ''.join(random.choice(string.ascii_lowercase + string.ascii_uppercase + string.digits) for _ in range(6))
+                          n1 = random.randint(0,12)
+                          n2 = random.randint(0,24)
+                          if n2>12:
+                              n2 = -1*(n2-12)
+                          sval = str(n1)+':'+str(n2)
+                          getList.append(key)
+                          putDict[key] = val
+                          appendDict[key] = aval
+                          sliceDict[key] = sval
+                      for ki in opsDict:
+                          i=0
+                          if ki==0:
+                              for kD in putDict:
+                                  if i<opsDict[ki]:
+                                      reqs_.append(str("put")+"(\'"+ str(kD) + "\',\'" + str(putDict[kD]) + "\')")
+                                  i+=1
+                          elif ki==1:
+                              for kD in appendDict:
+                                  if i<opsDict[ki]:
+                                      reqs_.append(str("append")+"(\'"+ str(kD) + "\',\'" + str(appendDict[kD]) + "\')")
+                                  i+=1
+                          elif ki==2:
+                              for kD in sliceDict:
+                                  if i<opsDict[ki]:
+                                      reqs_.append(str("slice")+"(\'"+ str(kD) + "\',\'" + str(sliceDict[kD]) + "\')")
+                                  i+=1
+                          elif ki==3:
+                              for kD in getList:
+                                  if i<opsDict[ki]:
+                                      reqs_.append(str("get")+"(\'"+ str(kD) + "\')")
+                                  i+=1
+                      return reqs_
+        else:
+            return reqs
+
+
+    def receive(msg=('Response',result,resultShuttle), from_=p):
+        if result=="ERROR":
+            output("Received Result for Request: ",resultShuttle,"Result: ",result,"from replica: ",p,"SYSTEM is ReConfiguring")
+            logger.info('Client: '+str(self)+' Received response: Reconfiguration in Progress ')
+            if self.pendingRequest == resultShuttle[2]:
+                self.pendingResult = result
+            return
+
+        logger.info('Client: '+str(self)+' Received Response for Request: '+str(resultShuttle[1])+' Response: '+str(result)+' From Replica: '+str(p));
+        output("Received Result for Request: ",str(resultShuttle[1]),"Result: ",result,"from replica: ",p)
+        i = 0
+        verifiedSignCount = 0
+        mdCount = 0
+        qc = 0
+        rsSet = set()
+        orig_dgs = HASHER(result.encode(),encoder=nacl.encoding.HexEncoder)
+        for sRs in resultShuttle[2]:
+            verifiedSign = False
+            verifiedMD = False
+            verify_key = nacl.signing.VerifyKey(public_keys[serverList[i]], encoder=nacl.encoding.HexEncoder)
+            try:
+                re_ = verify_key.verify(resultShuttle[2][i])
+                verifiedSignCount +=1
+                verifiedSign = True
+                output("Signature verification passed for request:",resultShuttle[1])
+            except:
+                logger.error('Client: '+str(self)+' Signature verification failed for Response: '+str(result)+' Request: '+str(resultShuttle[1]))
+                logger.warning('Client: '+str(self)+' Raising Reconfiguration Request')
+                output("Signature verification failed for request:",resultShuttle[1],"Raising Reconfiguration Request")
+                send(('Reconfiguration From Client',result,resultShuttle), to=olympus)
+                return
+            re_ = json.loads(re_)
+            if str(re_[1])!=str(orig_dgs):
+                logger.error('Client: '+str(self)+' Cryptographic hash mismatch error. Integrity of Response has been compromised for: ' +str(result)+' Request: '+str(resultShuttle[1]))
+                logger.warning('Client: '+str(self)+' Raising Reconfiguration Request')
+                output("Cryptographic hash mismatch error. Result's integrity has been compromised. Message Digest check fails")
+                send(('Reconfiguration From Client',result,resultShuttle), to=olympus)
+                return
+            else:
+                mdCount+=1
+                verifiedMD = True
+            if verifiedSign and verifiedMD:
+                qc+=1
+            i+=1
+        if qc > self.numReplicas/2:
+            responsesCount.add(str(p))
+
+        if self.pendingRequest == resultShuttle[1][2]:
+            self.pendingResult = result
+
+    def signRequest(request):
+        req2jsonstr = json.dumps(request)
+        signedReq = signing_key.sign(req2jsonstr.encode())
+        return signedReq
+
+    def run():
+        config(channel="fifo")
+        logpath = './logs'
+        logfile = 'Client_'+str(clientId)+'.log'
+        fh = logging.FileHandler(os.path.join(logpath,logfile))
+        formatter = logging.Formatter('%(asctime)s - %(processName)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        logger.setLevel(logging.DEBUG)
+        logger.info('Client: '+str(self)+' started running. Request List: '+str(self.reqs)+ ' Getting Configuration from Olympus ')
+        output("Client: ",str(self)," started running. Request List: ",str(self.reqs), " Getting Configuration from Olympus ")
+        clk = logical_clock()
+        send(('SendConfiguration',), to=olympus)
+        if(await(self.replicaConfig==True)):
+            logger.info('Client: '+str(self)+' Received Configuration from Olympus. Server List: '+str(serverList)+' HEAD: '+str(serverList[0])+' TAIL: '+str(serverList[-1]))
+        while reqId < len(self.reqs):                      #for req in self.reqs:
+            req = self.reqs[reqId]
+            self.pendingRequest = req
+            self.pendingResult = None
+            clk = logical_clock()
+            checkPeriodically()
+            self.requests[reqId] = req
+            if req not in self.processedReqsCache:
+                processRequest(req)					# Maintain a dictionary to check expected content at end of test case
+                self.processedReqsCache.append(req)
+            logger.info('Client: '+str(self)+' Sending Request to Head. Request: '+str((clientId,reqId,req)))
+            sendRequest(signRequest((clientId,reqId,req)))
+            if(await(self.pendingResult!=None)):
+                logger.info('Client: '+str(self)+' Received Response for Request: '+str(req)+' Response: '+str(self.pendingResult))
+                output("Received Response for Request YES HERE ONLY",req,"Response:",str(self.pendingResult))
+                if str(self.pendingResult)=="ERROR":
+                    self.replicaConfig = False
+                    continue
+            elif timeout(clientTimeout):
+                output("Client Timing Out for request:",str(self),(clientId,reqId,req))
+                checkPeriodically()
+                sendAll(signRequest((clientId,reqId,req)))
+            reqId +=1
+            
+        logger.info('Client: '+str(self)+' Local Result Dictionary: '+str(resultDict))
+        output("---------------------------- Client DICT ---------------------------------------")
+        output(resultDict)
+        sendDictToOlympus()
+        if(await(False)): pass
+        elif(timeout(1000)): pass
+        output("Client Exiting!")
+
+    def checkPeriodically():
+        while self.replicaConfig == False:   #Olympus is reconfiguring. Send periodic configuration request to Olympus
+            output("Client:",str(self),"Periodically Sending Configuration Request to Olympus",str(olympus))
+            send(('SendConfiguration',), to=olympus)
+            if(await(self.replicaConfig==True)):
+                break
+            elif timeout(self.resendDelay): pass
+
+    def processRequest(req):
+            logger.info('Client: '+str(self)+' Processing Request for Verification and adding operation to local Dictionary '+str(req))
+            if "put" in req:
+                req = REPLACER.multiReplace(req,rDic)
+                req = req.split(',')
+                resultDict[str(req[0])] = str(req[1])
+            elif "get" in req: pass
+            elif "append" in req:
+                req = REPLACER.multiReplace(req,rDic)
+                req = req.split(',')
+                if str(req[0]) in resultDict:
+                    resultDict[str(req[0])] = "".join((resultDict[str(req[0])],(str(req[1]))))
+            elif "slice" in req:
+                req = REPLACER.multiReplace(req,rDic)
+                req = req.split(',')
+                a,b = req[1].split(':')
+                if str(req[0]) in resultDict:
+                    resultDict[str(req[0])] = resultDict[str(req[0])][int(a):int(b)]
+
+    def sendRequest(request):
+            logger.info('Client: '+str(self)+' Sending Request: '+str(request)+' to Head: '+str(self.head))
+            output("sendRequest: Client sending request to Head:",self.head," Request",request)
+            send(('Request',request), to=self.head)
+
+    def sendAll(request):
+        i=0
+        self.responsesCount = set()
+        self.replicaConfig = False
+        self.pendingResult = None
+        checkPeriodically()
+        output("Sending Request To All Servers (Retransmission)")
+        logger.info('Client: '+str(self)+' Sending Request To All Servers (Retransmission): '+str(request)+' to Servers: '+str(serverList))
+        for server in serverList:
+            output("Sending request to server",server," Request",request)
+            logger.info('Client: '+str(self)+' Sending Request: '+str(request)+' to Server: '+str(server))
+            send(('RetransmissionRequest',request), to=server)
+            i+=1
+        
+        if(await(self.pendingResult!=None)):
+            logger.info('Client: '+str(self)+' Received Response for Request from a Quorum'+str(self.pendingResult))
+            output("Received Response for Request from a Quorum",self.responsesCount)
+        elif timeout(clientTimeout):
+            sendAll(request)
+
+    def sendDictToOlympus():
+            send(('Client Dict',self.resultDict), to=olympus)
+
+
+    def receive(msg=('Olympus Result',request,result), from_=p):
+        output("Got Result from Olymus for request: ",request," Result: ",result)
+        if self.pendingRequest == request[2]:
+            self.pendingResult = result
+    
+    # Receive Configuration from Olympus	
+    def receive(msg=('ReceiveConfiguration',serverList,public_keys), from_=p):
+        output("Got CONFIGURTIOn from OLYMPUS: ",serverList)
+        if serverList==None:
+            self.replicaConfig = False
+            sendDictToOlympus()
+            return
+        output("Received Configuration from Olympus. Server List: ",serverList," Head = ",serverList[0]," Tail = ",serverList[-1])
+        logger.info('Received Configuration from Olympus. Server List: '+str(serverList)+'Head = '+str(serverList[0]))
+        self.serverList = serverList
+        self.numReplicas = len(self.serverList)
+        if self.numReplicas > 0:
+            self.head = serverList[0]
+            self.tail = serverList[-1]
+        self.public_keys = public_keys
+        self.replicaConfig = True
+    
+    def receive(msg=('Retransmitted Response',result,resultShuttle), from_=p):
+        if result=="ERROR":
+            output("Received Result for Retransmitted Request: ",resultShuttle,"Result: ",result,"from replica: ",p,"SYSTEM is ReConfiguring!!")
+            logger.info('Client: '+str(self)+' Received response for retransmitted Request: Reconfiguration in Progress ')
+            if self.pendingRequest == resultShuttle[2]:
+                self.pendingResult = result
+            return
+
+        logger.info('Client: '+str(self)+' Received Response for Retransmitted Request: '+str(resultShuttle[1])+' Response: '+str(result)+' From Replica: '+str(p));
+        output("Received Result for Retransmitted Request: ",str(resultShuttle[1]),"Result: ",result,"from replica: ",p)
+        i = 0
+        verifiedSignCount = 0
+        mdCount = 0
+        qc = 0
+        rsSet = set()
+        orig_dgs = HASHER(result.encode(),encoder=nacl.encoding.HexEncoder)
+        for sRs in resultShuttle[2]:
+            verifiedSign = False
+            verifiedMD = False
+            verify_key = nacl.signing.VerifyKey(public_keys[serverList[i]], encoder=nacl.encoding.HexEncoder)
+            try:
+                re_ = verify_key.verify(resultShuttle[2][i])
+                verifiedSignCount +=1
+                verifiedSign = True
+                output("Signature verification passed for request:",resultShuttle[1])
+            except:
+                logger.error('Client: '+str(self)+' Signature verification failed for Response: '+str(result)+' Request: '+str(resultShuttle[1]))
+                logger.warning('Client: '+str(self)+' Raising Reconfiguration Request')
+                output("Signature verification failed for request:",resultShuttle[1],"Raising Reconfiguration Request")
+                send(('Reconfiguration From Client',result,resultShuttle), to=olympus)
+                return
+            re_ = json.loads(re_)
+            if str(re_[1])!=str(orig_dgs):
+                logger.error('Client: '+str(self)+' Cryptographic hash mismatch error. Integrity of Response has been compromised for: ' +str(result)+' Request: '+str(resultShuttle[1]))
+                logger.warning('Client: '+str(self)+' Raising Reconfiguration Request')
+                output("Cryptographic hash mismatch error. Result's integrity has been compromised. Message Digest check fails")
+                send(('Reconfiguration From Client',result,resultShuttle), to=olympus)
+                return
+            else:
+                mdCount+=1
+                verifiedMD = True
+            if verifiedSign and verifiedMD:
+                qc+=1
+            i+=1
+
+        if self.pendingRequest == resultShuttle[1][2]:
+            responsesCount.add(str(p))
+            if len(responsesCount) > self.numReplicas/2:
+                self.pendingResult = result

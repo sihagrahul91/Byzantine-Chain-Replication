@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+
+import sys
+import json
+import pickle
+import re
+import itertools
+import heapq
+import time
+import random
+import string
+import collections
+import nacl.encoding
+import nacl.signing
+from nacl.hash import blake2b
+from nacl.bindings.utils import sodium_memcmp
+import nacl.hash
+import json
+import logging
+import os.path
+
+CLIENT = import_da('client')
+REPLICA = import_da('replica')
+OLYMPUS = import_da('olympus')
+
+HASHER = nacl.hash.sha256
+
+def main():
+    config(clock='Lamport')
+    config(channel="fifo")
+    f = open('./'+sys.argv[-1])						# Take file name as input from command line
+    # Create logs directory
+    if not os.path.exists("logs"):
+        os.makedirs("logs")
+    config = {}
+    requests = collections.defaultdict(list)                            # Dict of client requests
+    failures = {}
+    for line in f:
+        if line[0] != '#':
+          (key,sep,val) = line.partition('=')
+          # if the line does not contain '=', it is invalid and hence ignored
+          if len(sep) != 0:
+              val = val.strip()
+              key = key.strip()
+              config[key] = int(val) if str.isdecimal(val) else val
+              if "workload" in key:
+                  k = int(re.search(r'\d+', key).group()) 
+                  vals = val.split(';')
+                  for vD in vals:
+                  	requests[k].append(vD.strip())
+              elif "failures" in key:
+                   k = re.findall(r"\[(.+?)\]", key)
+                   vals = val.split(';')
+                   for vD in vals:
+                       fail_src,fail_type = re.findall(r'(?:[^,(]|\([^)]*\))+', vD)    #failure Source,Type
+                       try:
+                           c,m = re.findall(r"\((.+?)\)", fail_src)[0].split(",")
+                           c = c.strip()
+                           m = m.strip()
+                       except:
+                           m = re.findall(r"\((.+?)\)", fail_src)[0].strip()
+                           c = '-1'
+                       fail_src = fail_src.split("(")[0]
+
+                       if k[0] in failures:
+                           failures[k[0]][(fail_src.strip(),(c,m))] = str(fail_type).strip();
+                       else:
+                           failures[k[0]] = {(fail_src.strip(),(c,m)):str(fail_type).strip()}    
+    output("CLIENT REQUESTS HERE:",requests)
+    print(failures)
+    num_client = config['num_client']
+    num_replica = config['t']*2+1
+    client_timeout = config['client_timeout']
+    try:
+        checkpt_interval = config['checkpt_interval']
+    except:
+        checkpt_interval = 1000
+    try:
+        signT = config['signT']
+    except:
+        signT = 0
+    try:
+        reT = config['reT']
+    except:
+        reT = 0
+    try:
+        client_retries = config['client_retries']
+    except:
+        client_retries = 100					# Infinite for now
+    head_timeout = config['head_timeout']   
+    nonhead_timeout = config['nonhead_timeout']   
+       
+    # Create the respective number of client and replica processes
+    clients = new(CLIENT.Client, num = num_client)
+
+    # Create Private-Public Key Pairs for each client and store them.
+    clientList = list(clients)
+    client_signing_keys = []          # Client Public-Private Key Pairs
+    client_public_keys = dict()  
+    for process in clientList:
+        signing_key = nacl.signing.SigningKey.generate()
+        client_signing_keys.append(signing_key)
+        verify_key = signing_key.verify_key
+        # Serialize the verify key to send it to a third party
+        verify_key_hex = verify_key.encode(encoder=nacl.encoding.HexEncoder)
+        client_public_keys[process] = verify_key_hex
+
+    # Create an Olympus process
+    olympus = new(OLYMPUS.Olympus, num = 1)
+    
+    i = 0
+    for process in clientList:
+        setup({process}, (olympus,requests[i],i,client_timeout,client_signing_keys[i],client_public_keys,clientList,signT))			     # Setup Clients
+        i+=1
+    
+    setup(olympus, (clients,olympus,num_replica,head_timeout,nonhead_timeout,client_public_keys,reT,failures,checkpt_interval))       # Setup Olympus
+    start(olympus)
+    start(clients)
