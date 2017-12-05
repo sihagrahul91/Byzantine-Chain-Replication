@@ -45,6 +45,6 @@ API's for all three Clients, Replicas and Olympus is present in the following fi
 2. olympus.da - contains Olympus code
 3. client.da - contains Client's code
 4. main.da - main function and parser api's
-5. header.da - utility files containing extra api's
+5. header.da - file containing utility api's
 
 Log Files: All the logs generated go to logs folder.
