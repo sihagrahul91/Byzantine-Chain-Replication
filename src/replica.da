@@ -191,11 +191,9 @@ class Server(process):
             if ('client_request',(str(request[0]),str(request[1]))) in self.failures_dict:
                 failType = self.failures_dict[('client_request',(str(request[0]),str(request[1])))]
                 self.faultTriggers[failType] +=1
-                output("TTTTTTTTTTTTTTTTTTTTTTTTTTT",self.faultTriggers)
                 if check_all_failures(failType) == True:
                     return
             if "increment_slot()" in self.faultTriggers and self.faultTriggers["increment_slot()"]>0:
-                output("TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTriggeered it")
                 self.faultTriggers["increment_slot()"]-=1
                 self.slot_number +=1
             faultyRequest = request
